@@ -1166,10 +1166,391 @@ else:
         if st.session_state.get("etl_plan"):
             st.markdown(f'<div class="ai-narrative">{st.session_state["etl_plan"]}</div>', unsafe_allow_html=True)
 
+# ── MODULE 3: REPORT & DASHBOARD ─────────────────────────────────────────────
+st.markdown("---")
+st.markdown("""
+<div style="display:flex;align-items:center;gap:0.8rem;margin-bottom:1.5rem">
+    <span style="font-family:'IBM Plex Mono',monospace;font-size:0.7rem;background:#0ea5e9;
+    color:#fff;padding:0.2rem 0.6rem;border-radius:4px;letter-spacing:0.05em">MODULE 03</span>
+    <span style="font-family:'IBM Plex Mono',monospace;font-size:1rem;font-weight:500;color:#0f172a">
+    Report &amp; Dashboard</span>
+</div>
+""", unsafe_allow_html=True)
+
+df_report = st.session_state.get("df")
+
+if df_report is None:
+    st.info("Load and transform data in Modules 01 & 02 first.")
+else:
+    rep_tabs = st.tabs([
+        "KPI Cards",
+        "Smart Charts",
+        "Correlation & Distribution",
+        "Executive Report",
+        "Custom Chart Builder"
+    ])
+
+    num_cols_rep  = df_report.select_dtypes(include="number").columns.tolist()
+    cat_cols_rep  = df_report.select_dtypes(include=["object","category"]).columns.tolist()
+    date_cols_rep = [c for c in df_report.columns if "date" in c.lower() or "time" in c.lower()
+                     or pd.api.types.is_datetime64_any_dtype(df_report[c])]
+
+    CHART_COLORS = ["#0ea5e9","#7c3aed","#10b981","#f59e0b","#ef4444","#ec4899","#14b8a6","#f97316"]
+
+    # ── Rep Tab 1: KPI Cards ──────────────────────────────────────────────────
+    with rep_tabs[0]:
+        st.markdown('<div class="section-title">AI-generated KPI cards</div>', unsafe_allow_html=True)
+
+        if st.button("Generate KPIs", key="gen_kpis_rep"):
+            with st.spinner("Extracting KPIs..."):
+                system = (
+                    "You are a senior BI analyst. Extract the most meaningful KPIs from this dataset. "
+                    "Return ONLY a JSON array — no markdown:\n"
+                    '[{"label": str, "value": str, "delta": str, '
+                    '"direction": "up"|"down"|"neutral", "insight": str, "color": "#hex"}]\n'
+                    "Return 4–6 KPIs. Format values clearly (use K/M, %, currency symbols). "
+                    "Color: use green for positive, red for negative, blue for neutral metrics."
+                )
+                stats = df_report.describe().to_string()
+                sample = df_report.head(5).to_string()
+                raw = call_claude(
+                    f"Columns: {list(df_report.columns)}\nStats:\n{stats}\nSample:\n{sample}",
+                    system
+                )
+                parsed = extract_json(raw)
+                if isinstance(parsed, list):
+                    st.session_state["kpis_rep"] = parsed
+
+        kpis = st.session_state.get("kpis_rep", [])
+        if kpis:
+            cols_k = st.columns(min(len(kpis), 3))
+            for i, kpi in enumerate(kpis):
+                direction = kpi.get("direction", "neutral")
+                arrow = "↑" if direction == "up" else ("↓" if direction == "down" else "→")
+                arrow_color = "#10b981" if direction == "up" else ("#ef4444" if direction == "down" else "#94a3b8")
+                accent = kpi.get("color", "#0ea5e9")
+                with cols_k[i % 3]:
+                    st.markdown(f"""
+                    <div style="background:#fff;border:1px solid #e2e8f0;border-top:3px solid {accent};
+                    border-radius:0 0 10px 10px;padding:1.2rem 1.4rem;margin-bottom:0.8rem">
+                        <div style="font-family:'IBM Plex Mono',monospace;font-size:0.68rem;
+                        text-transform:uppercase;letter-spacing:0.1em;color:#94a3b8;margin-bottom:0.4rem">
+                        {kpi.get('label','')}</div>
+                        <div style="font-family:'IBM Plex Mono',monospace;font-size:2rem;
+                        color:#0f172a;line-height:1">{kpi.get('value','—')}</div>
+                        <div style="font-size:0.78rem;color:{arrow_color};margin-top:0.3rem;font-weight:500">
+                        {arrow} {kpi.get('delta','')}</div>
+                        <div style="font-size:0.75rem;color:#64748b;margin-top:0.4rem">
+                        {kpi.get('insight','')}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+    # ── Rep Tab 2: Smart Charts ───────────────────────────────────────────────
+    with rep_tabs[1]:
+        st.markdown('<div class="section-title">AI-recommended charts</div>', unsafe_allow_html=True)
+
+        if st.button("Generate smart charts", key="gen_charts"):
+            with st.spinner("Claude is choosing the best charts for your data..."):
+                system = (
+                    "You are a data visualization expert. "
+                    "Recommend the best charts for this dataset. "
+                    "Return ONLY a JSON array — no markdown:\n"
+                    '[{"title": str, "type": "bar"|"line"|"pie"|"scatter"|"histogram"|"box"|"area", '
+                    '"x": str|null, "y": str|null, "color": str|null, '
+                    '"agg": "sum"|"mean"|"count"|"none", "rationale": str}]\n'
+                    "Return 4 charts. Only use column names that exist. "
+                    "For bar/line with categorical x, always set agg. "
+                    "Prioritize charts that reveal trends, distributions, or comparisons."
+                )
+                schema = ", ".join([f"{c}({df_report[c].dtype})" for c in df_report.columns])
+                raw = call_claude(
+                    f"Columns: {schema}\nSample:\n{df_report.head(4).to_string()}",
+                    system
+                )
+                parsed = extract_json(raw)
+                if isinstance(parsed, list):
+                    st.session_state["charts_rep"] = parsed
+
+        charts = st.session_state.get("charts_rep", [])
+        if charts:
+            chart_pairs = [charts[i:i+2] for i in range(0, len(charts), 2)]
+            for pair in chart_pairs:
+                cols_ch = st.columns(len(pair))
+                for ci, cfg in enumerate(pair):
+                    with cols_ch[ci]:
+                        try:
+                            ctype = cfg.get("type","bar")
+                            x = cfg.get("x") if cfg.get("x") in df_report.columns else None
+                            y = cfg.get("y") if cfg.get("y") in df_report.columns else None
+                            color = cfg.get("color") if cfg.get("color") in df_report.columns else None
+                            agg = cfg.get("agg","none")
+                            title = cfg.get("title","Chart")
+
+                            plot_df = df_report.copy()
+
+                            # Aggregate if needed
+                            if agg != "none" and x and y:
+                                if agg == "sum":
+                                    plot_df = plot_df.groupby(x)[y].sum().reset_index()
+                                elif agg == "mean":
+                                    plot_df = plot_df.groupby(x)[y].mean().reset_index()
+                                elif agg == "count":
+                                    plot_df = plot_df.groupby(x)[y].count().reset_index()
+                                color = None  # color col may not survive groupby
+
+                            fig = None
+                            kw = dict(color_discrete_sequence=CHART_COLORS, title=title)
+
+                            if ctype == "bar":
+                                fig = px.bar(plot_df, x=x, y=y, color=color, **kw)
+                            elif ctype == "line":
+                                fig = px.line(plot_df, x=x, y=y, color=color, **kw)
+                            elif ctype == "area":
+                                fig = px.area(plot_df, x=x, y=y, color=color, **kw)
+                            elif ctype == "pie":
+                                fig = px.pie(plot_df, names=x, values=y,
+                                             color_discrete_sequence=CHART_COLORS, title=title)
+                            elif ctype == "scatter":
+                                fig = px.scatter(plot_df, x=x, y=y, color=color, **kw)
+                            elif ctype == "histogram":
+                                fig = px.histogram(plot_df, x=x or y, color=color, **kw)
+                            elif ctype == "box":
+                                fig = px.box(plot_df, x=x, y=y, color=color, **kw)
+
+                            if fig:
+                                fig.update_layout(
+                                    font_family="IBM Plex Sans",
+                                    title_font_family="IBM Plex Mono",
+                                    title_font_size=13,
+                                    plot_bgcolor="white",
+                                    paper_bgcolor="white",
+                                    margin=dict(l=10, r=10, t=40, b=10),
+                                    height=320,
+                                )
+                                fig.update_xaxes(showgrid=False, linecolor="#e2e8f0")
+                                fig.update_yaxes(showgrid=True, gridcolor="#f1f5f9")
+                                st.plotly_chart(fig, use_container_width=True)
+                                st.caption(f"💡 {cfg.get('rationale','')}")
+                        except Exception as e:
+                            st.caption(f"Could not render chart: {e}")
+
+    # ── Rep Tab 3: Correlation & Distribution ─────────────────────────────────
+    with rep_tabs[2]:
+        st.markdown('<div class="section-title">Statistical exploration</div>', unsafe_allow_html=True)
+
+        exp_type = st.radio("View", ["Correlation heatmap", "Distribution plots", "Value counts"], horizontal=True)
+
+        if exp_type == "Correlation heatmap":
+            if len(num_cols_rep) >= 2:
+                corr = df_report[num_cols_rep].corr()
+                fig_corr = px.imshow(
+                    corr, text_auto=".2f", aspect="auto",
+                    color_continuous_scale="RdBu_r",
+                    title="Correlation matrix",
+                    zmin=-1, zmax=1
+                )
+                fig_corr.update_layout(
+                    font_family="IBM Plex Sans",
+                    title_font_family="IBM Plex Mono",
+                    paper_bgcolor="white", plot_bgcolor="white",
+                    margin=dict(l=10, r=10, t=40, b=10)
+                )
+                st.plotly_chart(fig_corr, use_container_width=True)
+            else:
+                st.info("Need at least 2 numeric columns for a correlation heatmap.")
+
+        elif exp_type == "Distribution plots":
+            if num_cols_rep:
+                dist_col = st.selectbox("Select column", num_cols_rep)
+                show_box = st.checkbox("Overlay box plot", value=True)
+                fig_dist = px.histogram(
+                    df_report, x=dist_col, marginal="box" if show_box else None,
+                    title=f"Distribution of {dist_col}",
+                    color_discrete_sequence=[CHART_COLORS[0]]
+                )
+                fig_dist.update_layout(
+                    font_family="IBM Plex Sans",
+                    title_font_family="IBM Plex Mono",
+                    paper_bgcolor="white", plot_bgcolor="white",
+                    margin=dict(l=10, r=10, t=40, b=10)
+                )
+                fig_dist.update_xaxes(showgrid=False)
+                fig_dist.update_yaxes(gridcolor="#f1f5f9")
+                st.plotly_chart(fig_dist, use_container_width=True)
+
+                # Stats summary
+                col_stats = df_report[dist_col].describe()
+                s1, s2, s3, s4 = st.columns(4)
+                s1.metric("Mean", f"{col_stats['mean']:.2f}")
+                s2.metric("Median", f"{df_report[dist_col].median():.2f}")
+                s3.metric("Std dev", f"{col_stats['std']:.2f}")
+                s4.metric("Skewness", f"{df_report[dist_col].skew():.2f}")
+            else:
+                st.info("No numeric columns available.")
+
+        elif exp_type == "Value counts":
+            if cat_cols_rep:
+                vc_col = st.selectbox("Select column", cat_cols_rep)
+                top_n = st.slider("Top N values", 5, 30, 10)
+                vc = df_report[vc_col].value_counts().head(top_n).reset_index()
+                vc.columns = [vc_col, "count"]
+                fig_vc = px.bar(
+                    vc, x=vc_col, y="count",
+                    title=f"Top {top_n} values in '{vc_col}'",
+                    color_discrete_sequence=[CHART_COLORS[1]]
+                )
+                fig_vc.update_layout(
+                    font_family="IBM Plex Sans",
+                    title_font_family="IBM Plex Mono",
+                    paper_bgcolor="white", plot_bgcolor="white",
+                    margin=dict(l=10, r=10, t=40, b=10)
+                )
+                fig_vc.update_xaxes(showgrid=False)
+                fig_vc.update_yaxes(gridcolor="#f1f5f9")
+                st.plotly_chart(fig_vc, use_container_width=True)
+            else:
+                st.info("No categorical columns available.")
+
+    # ── Rep Tab 4: Executive Report ───────────────────────────────────────────
+    with rep_tabs[3]:
+        st.markdown('<div class="section-title">AI executive report</div>', unsafe_allow_html=True)
+
+        rep_lang = st.radio("Report language", ["French", "English"], horizontal=True)
+        rep_audience = st.selectbox("Target audience", [
+            "Senior manager / Director",
+            "Data team / Technical",
+            "C-level / Executive",
+            "Client / External stakeholder"
+        ])
+        rep_context = st.text_input(
+            "Add context (optional)",
+            placeholder="e.g. This is monthly sales data for the Casablanca region, Q1 2025"
+        )
+
+        if st.button("Generate executive report", key="gen_exec_rep"):
+            with st.spinner("Writing your report..."):
+                clean_log = st.session_state.get("clean_log", [])
+                kpis_summary = json.dumps(st.session_state.get("kpis_rep", []), ensure_ascii=False)
+                stats_str = df_report.describe().to_string()
+
+                system = (
+                    f"You are a senior BI consultant writing a formal executive report in {rep_lang}. "
+                    f"Audience: {rep_audience}. "
+                    "Structure the report with these sections:\n"
+                    "1. Executive Summary (2–3 sentences)\n"
+                    "2. Dataset Overview (what the data represents, shape, time period if visible)\n"
+                    "3. Key Findings & KPIs (specific numbers, bullet points)\n"
+                    "4. Risks & Anomalies (data quality issues, outliers, gaps)\n"
+                    "5. Recommendations (actionable, prioritized)\n"
+                    "6. Next Steps\n"
+                    "Be specific, cite numbers, use professional language. Max 400 words."
+                )
+                user_msg = (
+                    f"Context: {rep_context or 'Not provided'}\n"
+                    f"Dataset: {df_report.shape[0]:,} rows × {df_report.shape[1]} columns\n"
+                    f"Columns: {list(df_report.columns)}\n"
+                    f"Statistics:\n{stats_str}\n"
+                    f"KPIs extracted:\n{kpis_summary}\n"
+                    f"Transformations applied:\n" +
+                    "\n".join(clean_log[-10:]) if clean_log else "None"
+                )
+                report = call_claude(user_msg, system, max_tokens=1500)
+                st.session_state["exec_report"] = report
+
+        if st.session_state.get("exec_report"):
+            st.markdown(
+                f'<div class="ai-narrative">{st.session_state["exec_report"]}</div>',
+                unsafe_allow_html=True
+            )
+            # Download report
+            st.download_button(
+                "⬇ Download report (.txt)",
+                data=st.session_state["exec_report"].encode("utf-8"),
+                file_name="executive_report_dataops.txt",
+                mime="text/plain"
+            )
+
+    # ── Rep Tab 5: Custom Chart Builder ──────────────────────────────────────
+    with rep_tabs[4]:
+        st.markdown('<div class="section-title">Build your own chart</div>', unsafe_allow_html=True)
+        st.caption("Full control — pick any columns and chart type.")
+
+        all_cols = list(df_report.columns)
+
+        with st.form("custom_chart_form"):
+            r1c1, r1c2, r1c3 = st.columns(3)
+            with r1c1:
+                cc_type = st.selectbox("Chart type", [
+                    "Bar", "Line", "Area", "Scatter",
+                    "Pie", "Histogram", "Box", "Funnel"
+                ])
+            with r1c2:
+                cc_x = st.selectbox("X axis", ["(none)"] + all_cols)
+            with r1c3:
+                cc_y = st.selectbox("Y axis", ["(none)"] + all_cols)
+
+            r2c1, r2c2, r2c3 = st.columns(3)
+            with r2c1:
+                cc_color = st.selectbox("Color by", ["(none)"] + all_cols)
+            with r2c2:
+                cc_agg = st.selectbox("Aggregate Y by", ["none","sum","mean","count","max","min"])
+            with r2c3:
+                cc_title = st.text_input("Chart title", "My chart")
+
+            cc_height = st.slider("Chart height (px)", 300, 700, 420)
+
+            if st.form_submit_button("Build chart"):
+                try:
+                    x = cc_x if cc_x != "(none)" else None
+                    y = cc_y if cc_y != "(none)" else None
+                    color = cc_color if cc_color != "(none)" else None
+                    plot_df = df_report.copy()
+
+                    if cc_agg != "none" and x and y:
+                        plot_df = getattr(plot_df.groupby(x)[y], cc_agg)().reset_index()
+                        color = None
+
+                    kw = dict(color_discrete_sequence=CHART_COLORS, title=cc_title, height=cc_height)
+                    fig = None
+
+                    if cc_type == "Bar":
+                        fig = px.bar(plot_df, x=x, y=y, color=color, **kw)
+                    elif cc_type == "Line":
+                        fig = px.line(plot_df, x=x, y=y, color=color, **kw)
+                    elif cc_type == "Area":
+                        fig = px.area(plot_df, x=x, y=y, color=color, **kw)
+                    elif cc_type == "Scatter":
+                        fig = px.scatter(plot_df, x=x, y=y, color=color, **kw)
+                    elif cc_type == "Pie":
+                        fig = px.pie(plot_df, names=x, values=y,
+                                     color_discrete_sequence=CHART_COLORS, title=cc_title)
+                    elif cc_type == "Histogram":
+                        fig = px.histogram(plot_df, x=x or y, color=color, **kw)
+                    elif cc_type == "Box":
+                        fig = px.box(plot_df, x=x, y=y, color=color, **kw)
+                    elif cc_type == "Funnel":
+                        fig = px.funnel(plot_df, x=y, y=x, color=color, **kw)
+
+                    if fig:
+                        fig.update_layout(
+                            font_family="IBM Plex Sans",
+                            title_font_family="IBM Plex Mono",
+                            plot_bgcolor="white", paper_bgcolor="white",
+                            margin=dict(l=10, r=10, t=50, b=10),
+                        )
+                        fig.update_xaxes(showgrid=False, linecolor="#e2e8f0")
+                        fig.update_yaxes(showgrid=True, gridcolor="#f1f5f9")
+                        st.session_state["custom_chart"] = fig
+                except Exception as e:
+                    st.error(f"Chart error: {e}")
+
+        if st.session_state.get("custom_chart"):
+            st.plotly_chart(st.session_state["custom_chart"], use_container_width=True)
+
 # ── Footer ─────────────────────────────────────────────────────────────────────
 st.markdown("""
 <div style="margin-top:3rem;padding-top:1rem;border-top:1px solid #e2e8f0;
 font-family:'IBM Plex Mono',monospace;font-size:0.7rem;color:#cbd5e1;text-align:center">
-DataOps AI · Module 01 + 02 — Data Quality, Cleaning &amp; ETL · Built by Mohammed Amine Goumri
+DataOps AI · Modules 01 · 02 · 03 — Quality, ETL &amp; Reporting · Built by Mohammed Amine Goumri
 </div>
 """, unsafe_allow_html=True)
