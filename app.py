@@ -845,10 +845,331 @@ if df_current is not None and st.session_state.get("clean_log"):
 
     st.session_state["step"] = 4
 
+# ── MODULE 2: ETL & TRANSFORMATION ───────────────────────────────────────────
+st.markdown("---")
+st.markdown("""
+<div style="display:flex;align-items:center;gap:0.8rem;margin-bottom:1.5rem">
+    <span style="font-family:'IBM Plex Mono',monospace;font-size:0.7rem;background:#7c3aed;
+    color:#fff;padding:0.2rem 0.6rem;border-radius:4px;letter-spacing:0.05em">MODULE 02</span>
+    <span style="font-family:'IBM Plex Mono',monospace;font-size:1rem;font-weight:500;color:#0f172a">
+    ETL &amp; Data Transformation</span>
+</div>
+""", unsafe_allow_html=True)
+
+# Only available if data is loaded
+df_etl = st.session_state.get("df")
+if df_etl is None:
+    st.info("Load data in Module 01 first to use ETL features.")
+else:
+    etl_tabs = st.tabs([
+        "AI SQL Generator",
+        "Column operations",
+        "Merge / Join",
+        "Pivot & Reshape",
+        "AI transformation plan"
+    ])
+
+    # ── ETL Tab 1: AI SQL Generator ───────────────────────────────────────────
+    with etl_tabs[0]:
+        st.markdown('<div class="section-title">Describe what you want — get SQL</div>', unsafe_allow_html=True)
+        st.caption("Describe a transformation in plain language. Claude writes the SQL and applies it.")
+
+        col_schema = ", ".join([f"{c} ({str(df_etl[c].dtype)})" for c in df_etl.columns])
+
+        sql_prompt = st.text_area(
+            "What do you want to do?",
+            placeholder="e.g. Calculate total revenue per region and sort by highest first\n"
+                        "e.g. Keep only rows where status = 'active' and amount > 1000\n"
+                        "e.g. Add a new column 'profit_margin' = (revenue - cost) / revenue * 100",
+            height=100,
+            label_visibility="collapsed"
+        )
+
+        if st.button("Generate & Preview SQL", key="gen_sql"):
+            if sql_prompt.strip():
+                with st.spinner("Claude is writing the SQL..."):
+                    system = (
+                        "You are an expert SQL analyst. The user has a pandas DataFrame. "
+                        "Write a pandas query or transformation based on their request. "
+                        "Return ONLY a JSON object — no markdown:\n"
+                        '{"sql": "the pandas code string using df as variable name", '
+                        '"explanation": "what this does in plain language", '
+                        '"result_description": "what the output will look like"}\n'
+                        "Use pandas syntax (df.query(), df.groupby(), df.assign(), etc). "
+                        "The result should always be assigned back to a variable called result_df."
+                    )
+                    user_msg = f"DataFrame schema: {col_schema}\nSample (2 rows):\n{df_etl.head(2).to_string()}\n\nUser request: {sql_prompt}"
+                    raw = call_claude(user_msg, system)
+                    parsed = extract_json(raw)
+
+                if parsed:
+                    st.session_state["etl_sql"] = parsed
+                    st.markdown(f"""
+                    <div style="background:#1e1e2e;color:#cdd6f4;font-family:'IBM Plex Mono',monospace;
+                    font-size:0.82rem;padding:1.2rem;border-radius:10px;white-space:pre-wrap;margin:0.8rem 0">
+{parsed.get('sql','')}
+                    </div>
+                    """, unsafe_allow_html=True)
+                    st.caption(f"💡 {parsed.get('explanation','')}")
+
+                    # Preview execution
+                    try:
+                        exec_globals = {"df": df_etl.copy(), "pd": pd, "np": np}
+                        exec(parsed["sql"], exec_globals)
+                        result_df = exec_globals.get("result_df", exec_globals.get("df"))
+                        st.session_state["etl_preview"] = result_df
+                        st.markdown(f"**Preview** — {result_df.shape[0]:,} rows × {result_df.shape[1]} cols")
+                        st.dataframe(result_df.head(20), use_container_width=True)
+                    except Exception as e:
+                        st.error(f"Execution error: {e}")
+                else:
+                    st.error("Could not parse Claude's response. Try rephrasing.")
+
+        # Apply SQL result
+        if st.session_state.get("etl_preview") is not None:
+            c1, c2 = st.columns([1, 4])
+            with c1:
+                if st.button("Apply to dataset", key="apply_sql"):
+                    st.session_state["df"] = st.session_state["etl_preview"]
+                    sql_code = st.session_state.get("etl_sql", {}).get("sql", "")
+                    st.session_state["clean_log"].append(f"ETL SQL applied: {sql_prompt[:80]}")
+                    st.session_state.pop("etl_preview", None)
+                    st.success("✓ Transformation applied to dataset")
+                    st.rerun()
+
+    # ── ETL Tab 2: Column operations ──────────────────────────────────────────
+    with etl_tabs[1]:
+        st.markdown('<div class="section-title">Column-level transformations</div>', unsafe_allow_html=True)
+        cols_etl = list(df_etl.columns)
+
+        with st.form("col_ops_form"):
+            r1, r2 = st.columns(2)
+            with r1:
+                op_type = st.selectbox("Operation", [
+                    "Add calculated column",
+                    "Split column by delimiter",
+                    "Merge two columns",
+                    "Extract date part",
+                    "Normalize (0–1 scale)",
+                    "Standardize (z-score)",
+                    "Bin numeric into categories",
+                    "Map values (dict replace)",
+                ])
+            with r2:
+                target_col = st.selectbox("Column", cols_etl, key="col_op_target")
+
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                new_col_name = st.text_input("New column name", placeholder="e.g. profit_margin")
+            with c2:
+                formula_input = st.text_input("Formula / delimiter / second column",
+                                              placeholder="e.g. revenue - cost  or  ,  or  last_name")
+            with c3:
+                bins_input = st.text_input("Bins (for binning, e.g. 0,100,500,1000)",
+                                           placeholder="0,100,500,1000")
+
+            labels_input = st.text_input("Bin labels (e.g. Low,Medium,High)", placeholder="Low,Medium,High")
+            map_input = st.text_area("Value mapping JSON (e.g. {\"Y\": 1, \"N\": 0})",
+                                     placeholder='{"Y": 1, "N": 0}', height=60)
+
+            date_part = st.selectbox("Date part (for extract)", ["year", "month", "day", "weekday", "quarter"])
+
+            if st.form_submit_button("Apply column operation"):
+                try:
+                    new_df = df_etl.copy()
+                    col_name = new_col_name or f"{target_col}_transformed"
+                    log_entry = ""
+
+                    if op_type == "Add calculated column":
+                        new_df[col_name] = new_df.eval(formula_input)
+                        log_entry = f"Added column '{col_name}' = {formula_input}"
+
+                    elif op_type == "Split column by delimiter":
+                        delim = formula_input or ","
+                        split_df = new_df[target_col].astype(str).str.split(delim, expand=True)
+                        for i, c in enumerate(split_df.columns):
+                            new_df[f"{target_col}_part{i+1}"] = split_df[c]
+                        log_entry = f"Split '{target_col}' by '{delim}'"
+
+                    elif op_type == "Merge two columns":
+                        sep = formula_input or " "
+                        second = bins_input or ""
+                        if second in new_df.columns:
+                            new_df[col_name] = new_df[target_col].astype(str) + sep + new_df[second].astype(str)
+                            log_entry = f"Merged '{target_col}' + '{second}' → '{col_name}'"
+
+                    elif op_type == "Extract date part":
+                        new_df[target_col] = pd.to_datetime(new_df[target_col], errors="coerce")
+                        new_df[col_name] = getattr(new_df[target_col].dt, date_part)
+                        log_entry = f"Extracted {date_part} from '{target_col}' → '{col_name}'"
+
+                    elif op_type == "Normalize (0–1 scale)":
+                        mn, mx = new_df[target_col].min(), new_df[target_col].max()
+                        new_df[col_name] = (new_df[target_col] - mn) / (mx - mn)
+                        log_entry = f"Normalized '{target_col}' to 0–1 → '{col_name}'"
+
+                    elif op_type == "Standardize (z-score)":
+                        mu, sigma = new_df[target_col].mean(), new_df[target_col].std()
+                        new_df[col_name] = (new_df[target_col] - mu) / sigma
+                        log_entry = f"Standardized '{target_col}' (z-score) → '{col_name}'"
+
+                    elif op_type == "Bin numeric into categories":
+                        bin_edges = [float(x.strip()) for x in bins_input.split(",")]
+                        bin_labels = [x.strip() for x in labels_input.split(",")]
+                        new_df[col_name] = pd.cut(new_df[target_col], bins=bin_edges,
+                                                   labels=bin_labels if len(bin_labels) == len(bin_edges)-1 else None)
+                        log_entry = f"Binned '{target_col}' into categories → '{col_name}'"
+
+                    elif op_type == "Map values (dict replace)":
+                        mapping = json.loads(map_input)
+                        new_df[col_name] = new_df[target_col].map(mapping).fillna(new_df[target_col])
+                        log_entry = f"Mapped values in '{target_col}' → '{col_name}'"
+
+                    st.session_state["df"] = new_df
+                    st.session_state["clean_log"].append(f"[ETL] {log_entry}")
+                    st.success(f"✓ {log_entry}")
+                    st.rerun()
+
+                except Exception as e:
+                    st.error(f"Operation failed: {e}")
+
+    # ── ETL Tab 3: Merge / Join ───────────────────────────────────────────────
+    with etl_tabs[2]:
+        st.markdown('<div class="section-title">Join with another dataset</div>', unsafe_allow_html=True)
+        st.caption("Upload a second file to join with your current dataset.")
+
+        second_file = st.file_uploader("Upload second dataset", type=["csv", "xlsx"], key="merge_file")
+        if second_file:
+            df2 = load_csv_excel(second_file)
+            st.caption(f"Second dataset: {df2.shape[0]:,} rows × {df2.shape[1]} cols")
+            st.dataframe(df2.head(5), use_container_width=True)
+
+            with st.form("merge_form"):
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    left_key = st.selectbox("Left key (your data)", df_etl.columns.tolist())
+                with c2:
+                    right_key = st.selectbox("Right key (second file)", df2.columns.tolist())
+                with c3:
+                    how = st.selectbox("Join type", ["inner", "left", "right", "outer"])
+
+                if st.form_submit_button("Merge datasets"):
+                    try:
+                        merged = pd.merge(df_etl, df2, left_on=left_key, right_on=right_key, how=how)
+                        st.session_state["df"] = merged
+                        st.session_state["clean_log"].append(
+                            f"[ETL] {how.upper()} JOIN on '{left_key}' = '{right_key}' → {merged.shape[0]:,} rows"
+                        )
+                        st.success(f"✓ Merged: {merged.shape[0]:,} rows × {merged.shape[1]} cols")
+                        st.dataframe(merged.head(10), use_container_width=True)
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Merge failed: {e}")
+
+    # ── ETL Tab 4: Pivot & Reshape ────────────────────────────────────────────
+    with etl_tabs[3]:
+        st.markdown('<div class="section-title">Pivot table / Reshape</div>', unsafe_allow_html=True)
+        cols_etl2 = list(df_etl.columns)
+        num_cols = df_etl.select_dtypes(include="number").columns.tolist()
+
+        reshape_type = st.radio("Operation", ["Pivot table", "Melt (wide → long)", "Transpose"], horizontal=True)
+
+        if reshape_type == "Pivot table":
+            with st.form("pivot_form"):
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    pivot_index = st.selectbox("Row (index)", cols_etl2)
+                with c2:
+                    pivot_cols = st.selectbox("Columns", cols_etl2)
+                with c3:
+                    pivot_vals = st.selectbox("Values", num_cols if num_cols else cols_etl2)
+                pivot_agg = st.selectbox("Aggregation", ["sum", "mean", "count", "min", "max", "median"])
+
+                if st.form_submit_button("Create pivot table"):
+                    try:
+                        pivoted = df_etl.pivot_table(
+                            index=pivot_index, columns=pivot_cols,
+                            values=pivot_vals, aggfunc=pivot_agg
+                        ).reset_index()
+                        pivoted.columns = [str(c) for c in pivoted.columns]
+                        st.session_state["df"] = pivoted
+                        st.session_state["clean_log"].append(
+                            f"[ETL] Pivot: index={pivot_index}, cols={pivot_cols}, values={pivot_vals} ({pivot_agg})"
+                        )
+                        st.success(f"✓ Pivot created: {pivoted.shape[0]} rows × {pivoted.shape[1]} cols")
+                        st.dataframe(pivoted.head(15), use_container_width=True)
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Pivot failed: {e}")
+
+        elif reshape_type == "Melt (wide → long)":
+            with st.form("melt_form"):
+                id_vars = st.multiselect("ID columns (keep as-is)", cols_etl2)
+                value_name = st.text_input("Value column name", "value")
+                var_name = st.text_input("Variable column name", "variable")
+
+                if st.form_submit_button("Melt dataset"):
+                    try:
+                        melted = df_etl.melt(id_vars=id_vars, var_name=var_name, value_name=value_name)
+                        st.session_state["df"] = melted
+                        st.session_state["clean_log"].append(
+                            f"[ETL] Melt: id_vars={id_vars} → {melted.shape[0]:,} rows"
+                        )
+                        st.success(f"✓ Melted: {melted.shape[0]:,} rows × {melted.shape[1]} cols")
+                        st.dataframe(melted.head(15), use_container_width=True)
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Melt failed: {e}")
+
+        elif reshape_type == "Transpose":
+            if st.button("Transpose dataset"):
+                transposed = df_etl.T.reset_index()
+                transposed.columns = [f"col_{i}" for i in range(len(transposed.columns))]
+                st.session_state["df"] = transposed
+                st.session_state["clean_log"].append("[ETL] Transposed dataset (rows ↔ columns)")
+                st.success(f"✓ Transposed: {transposed.shape[0]} rows × {transposed.shape[1]} cols")
+                st.rerun()
+
+    # ── ETL Tab 5: AI Transformation Plan ────────────────────────────────────
+    with etl_tabs[4]:
+        st.markdown('<div class="section-title">AI full transformation plan</div>', unsafe_allow_html=True)
+        st.caption("Describe your end goal. Claude writes a complete step-by-step transformation plan.")
+
+        goal = st.text_area(
+            "What is the final dataset you need?",
+            placeholder="e.g. I need a monthly summary table showing total revenue, average order value, "
+                        "and number of transactions per region, ready for a Power BI dashboard.",
+            height=120,
+            label_visibility="collapsed"
+        )
+
+        if st.button("Generate transformation plan", key="gen_plan"):
+            if goal.strip():
+                with st.spinner("Claude is building your transformation plan..."):
+                    system = (
+                        "You are a senior BI consultant. "
+                        "Given a dataset schema and a user's goal, produce a clear step-by-step "
+                        "data transformation plan. Each step should be specific and actionable. "
+                        "Format your response as a numbered list. "
+                        "End with a note on what the final dataset will look like and how to use it in Power BI."
+                    )
+                    schema_info = "\n".join([f"- {c}: {df_etl[c].dtype} ({df_etl[c].nunique()} unique values)" for c in df_etl.columns])
+                    user_msg = (
+                        f"Dataset: {df_etl.shape[0]:,} rows × {df_etl.shape[1]} columns\n"
+                        f"Columns:\n{schema_info}\n\n"
+                        f"Sample:\n{df_etl.head(3).to_string()}\n\n"
+                        f"Goal: {goal}"
+                    )
+                    plan = call_claude(user_msg, system, max_tokens=1500)
+                    st.session_state["etl_plan"] = plan
+
+        if st.session_state.get("etl_plan"):
+            st.markdown(f'<div class="ai-narrative">{st.session_state["etl_plan"]}</div>', unsafe_allow_html=True)
+
 # ── Footer ─────────────────────────────────────────────────────────────────────
 st.markdown("""
 <div style="margin-top:3rem;padding-top:1rem;border-top:1px solid #e2e8f0;
 font-family:'IBM Plex Mono',monospace;font-size:0.7rem;color:#cbd5e1;text-align:center">
-DataOps AI · Module 01 — Data Quality &amp; Cleaning · Built by Mohammed Amine Goumri
+DataOps AI · Module 01 + 02 — Data Quality, Cleaning &amp; ETL · Built by Mohammed Amine Goumri
 </div>
 """, unsafe_allow_html=True)
